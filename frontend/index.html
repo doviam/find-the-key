@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="es">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Vacío = API en http://127.0.0.1:5000 con Live Server. Forzar otra URL: content="http://127.0.0.1:PUERTO" -->
+    <meta name="api-base" content="" />
+    <title>Find The Key</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=Archivo+Black&family=DM+Sans:wght@700;800&family=JetBrains+Mono:wght@600;700&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="stylesheet" href="css/styles.css" />
+  </head>
+  <body>
+    <div class="bg-radial" aria-hidden="true"></div>
+    <div class="bg-grid" aria-hidden="true"></div>
+    <div class="glow glow-a" aria-hidden="true"></div>
+    <div class="glow glow-b" aria-hidden="true"></div>
+
+    <header class="header">
+      <div class="logo">
+        <span class="logo-mark">◆</span>
+        <h1>Find The Key</h1>
+      </div>
+      <p class="tagline">Tonalidad</p>
+    </header>
+
+    <main class="main">
+      <section class="panel upload-panel" id="dropzone">
+        <input type="file" id="file-input" accept=".mp3,.wav,.flac,.ogg,.m4a,.aac,.webm" hidden />
+        <div class="upload-inner">
+          <div class="upload-icon" aria-hidden="true">⌁</div>
+          <p class="upload-title">Arrastra tu audio aquí</p>
+          <p class="upload-hint">o elige un archivo · MP3, WAV, FLAC, OGG, M4A…</p>
+          <button type="button" class="btn btn-primary" id="btn-browse">Seleccionar archivo</button>
+        </div>
+      </section>
+
+      <div class="loading" id="loading" hidden>
+        <div class="spinner" role="status" aria-label="Analizando"></div>
+        <p class="loading-text">Analizando tonalidad…</p>
+      </div>
+
+      <section class="results" id="results" hidden>
+        <div class="key-hero">
+          <article class="card key-card" aria-live="polite">
+            <span class="metric-label key-hero-label">Tonalidad</span>
+            <span class="key-value" id="val-key">—</span>
+          </article>
+        </div>
+      </section>
+
+      <p class="error" id="error" hidden></p>
+    </main>
+
+    <footer class="footer">
+      <span>Detector librosa</span>
+    </footer>
+
+    <script src="js/app.js"></script>
+  </body>
+</html>
