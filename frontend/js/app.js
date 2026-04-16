@@ -3,7 +3,7 @@
   const apiBase = (() => {
     const c = meta?.getAttribute("content")?.trim();
     if (c) return c.replace(/\/$/, "");
-    const API_LOCAL = "http://127.0.0.1:5000";
+    const API_LOCAL = "http://127.0.0.1:8000";
     if (window.location.protocol === "file:") {
       return API_LOCAL;
     }
@@ -64,12 +64,19 @@
         throw new Error(text.slice(0, 200) || "Respuesta no válida");
       }
       if (!res.ok) {
-        throw new Error(data.detail || data.message || `Error ${res.status}`);
+        const detail = data.detail;
+        const detailMsg =
+          typeof detail === "string"
+            ? detail
+            : Array.isArray(detail)
+              ? detail.map((d) => d.msg || JSON.stringify(d)).join("; ")
+              : data.message || `Error ${res.status}`;
+        throw new Error(detailMsg);
       }
       render(data);
       results.hidden = false;
     } catch (e) {
-      console.log(e);
+      console.error(e);
       showError(e.message || "No se pudo analizar el archivo.");
     } finally {
       setLoading(false);
