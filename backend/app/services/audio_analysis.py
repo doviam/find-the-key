@@ -1,7 +1,12 @@
-"""BPM and key estimation using librosa (beat tracking + Krumhansl–Schmuckler)."""
+"""BPM and key estimation using librosa (beat tracking + Krumhansl–Schmuckler).
+
+Tuned for low RAM/CPU (e.g. Render free tier): fixed sample rate, short decode window,
+explicit cleanup of large arrays.
+"""
 
 from __future__ import annotations
 
+import gc
 import io
 from dataclasses import dataclass, field
 
@@ -33,14 +38,15 @@ NOTE_NAMES: list[str] = [
     "B",
 ]
 
+# Analysis / memory budget (mono @ ANALYSIS_SR).
+ANALYSIS_SR = 22050
 HOP_LENGTH = 512
+# Fewer frames for chroma than for beats saves RAM on long windows.
+CHROMA_HOP_LENGTH = 1024
 
-# Key-focused window: skip intros / drops with weak harmony (electronic, rap, etc.).
 KEY_WINDOW_OFFSET_SEC = 30.0
-KEY_WINDOW_DURATION_SEC = 30.0
-# If the file is shorter than offset+duration, fall back to the start of the file.
-MIN_SEGMENT_SEC = 5.0
-# Pre-emphasis for chroma path (clarity in mid–high harmonics).
+KEY_WINDOW_DURATION_SEC = 20.0
+MIN_SEGMENT_SEC = 3.0
 PREEMPHASIS_COEF = 0.97
 
 
@@ -65,15 +71,20 @@ def _load_mono_window(
     data: bytes,
     offset_sec: float,
     duration_sec: float | None,
-) -> tuple[np.ndarray, int]:
-    """Decode a mono segment; duration None = until end of file."""
-    return librosa.load(
+) -> np.ndarray:
+    """
+    Decode only [offset, offset+duration) resampled to ANALYSIS_SR mono.
+    librosa passes offset/duration to the loader so the decoder can bound work
+    (exact behavior depends on format/backend).
+    """
+    y, _sr = librosa.load(
         io.BytesIO(data),
-        sr=None,
+        sr=ANALYSIS_SR,
         mono=True,
         offset=offset_sec,
         duration=duration_sec,
     )
+    return y
 
 
 def _segment_duration_sec(y: np.ndarray, sr: int) -> float:
@@ -82,26 +93,32 @@ def _segment_duration_sec(y: np.ndarray, sr: int) -> float:
     return float(y.size) / float(sr)
 
 
-def _load_body_or_fallback(data: bytes) -> tuple[np.ndarray, int]:
+def _load_body_or_fallback(data: bytes) -> np.ndarray:
     """
-    Prefer [30s, 60s] of the track for analysis; if that region is missing or too short,
-    use [0s, 30s] so short clips and DJ tools still return a result.
+    Prefer seconds [30, 50); if too little audio, use [0, 20).
+    All paths return mono @ ANALYSIS_SR.
     """
-    y_body, sr = _load_mono_window(
+    y_body = _load_mono_window(
         data,
         KEY_WINDOW_OFFSET_SEC,
         KEY_WINDOW_DURATION_SEC,
     )
     need_sec = max(MIN_SEGMENT_SEC, 1.0)
-    if _segment_duration_sec(y_body, sr) >= need_sec:
-        return y_body, sr
+    if _segment_duration_sec(y_body, ANALYSIS_SR) >= need_sec:
+        return y_body
 
-    y_head, sr2 = _load_mono_window(data, 0.0, KEY_WINDOW_DURATION_SEC)
+    y_head = _load_mono_window(data, 0.0, KEY_WINDOW_DURATION_SEC)
     if y_head.size == 0:
-        return y_body, sr
-    if y_body.size == 0 or _segment_duration_sec(y_head, sr2) > _segment_duration_sec(y_body, sr):
-        return y_head, sr2
-    return y_body, sr
+        return y_body
+    if y_body.size == 0 or _segment_duration_sec(y_head, ANALYSIS_SR) > _segment_duration_sec(
+        y_body, ANALYSIS_SR
+    ):
+        del y_body
+        gc.collect()
+        return y_head
+    del y_head
+    gc.collect()
+    return y_body
 
 
 def _preprocess(y: np.ndarray, sr: int, trim_db: float = 30.0) -> np.ndarray:
@@ -116,12 +133,11 @@ def _preprocess(y: np.ndarray, sr: int, trim_db: float = 30.0) -> np.ndarray:
 
 
 def _harmonic_preemphasis(y: np.ndarray, sr: int) -> np.ndarray:
-    """
-    HPSS → harmonic only → pre-emphasis → re-normalize for stable chroma_cqt.
-    """
+    """HPSS → harmonic only → pre-emphasis → peak normalize for chroma."""
     if y.size == 0:
         return y
-    y_harmonic, _ = librosa.effects.hpss(y)
+    y_harmonic, _y_perc = librosa.effects.hpss(y)
+    del _y_perc
     if y_harmonic.size == 0:
         return y
     y_harmonic = librosa.effects.preemphasis(y_harmonic, coef=PREEMPHASIS_COEF)
@@ -178,9 +194,7 @@ def _beat_consistency_score(beat_frames: np.ndarray, sr: int) -> float:
         return 0.3
 
     cv = float(np.std(ibi) / mean_ibi)
-    # cv ~ 0.02–0.05: very steady; cv > 0.25: loose
     score = 1.0 / (1.0 + 8.0 * cv)
-    # Penalize very few beats (short clips)
     n_penalty = min(1.0, beat_frames.size / 32.0)
     score = float(np.clip(score * (0.5 + 0.5 * n_penalty), 0.0, 1.0))
     return round(score, 3)
@@ -197,7 +211,7 @@ def _half_double_alternates(bpm_rounded: int) -> dict[str, int]:
 
 
 def _pearson_correlation(a: np.ndarray, b: np.ndarray) -> float:
-    """Safe Pearson r between two 1-D vectors (same as corrcoef[0,1], NaN-safe)."""
+    """Safe Pearson r between two 1-D vectors (NaN-safe)."""
     if a.size != b.size or a.size != 12:
         return -1.0
     if float(np.std(a)) < 1e-12 or float(np.std(b)) < 1e-12:
@@ -211,9 +225,7 @@ def _pearson_correlation(a: np.ndarray, b: np.ndarray) -> float:
 def _estimate_key_krumhansl_schmuckler(chroma: np.ndarray) -> tuple[str, float]:
     """
     Krumhansl–Schmuckler: mean chroma (12,) vs rolled major/minor templates; pick best of 24.
-
-    Confidence combines (1) strength of the winning correlation in [0, 1] and
-    (2) separation from the runner-up (ambiguous keys get a lower score).
+    Uses a single small correlation buffer (no per-key Python lists).
     """
     if chroma.ndim != 2 or chroma.shape[0] != 12:
         return "unknown", 0.0
@@ -222,59 +234,77 @@ def _estimate_key_krumhansl_schmuckler(chroma: np.ndarray) -> tuple[str, float]:
     if not np.any(np.isfinite(chroma_mean)) or float(np.max(np.abs(chroma_mean))) < 1e-12:
         return "unknown", 0.0
 
-    correlations: list[float] = []
-    labels: list[str] = []
-
+    corrs = np.empty(24, dtype=np.float64)
+    k = 0
     for tonic in range(12):
-        major_t = np.roll(MAJOR_PROFILE, tonic)
-        minor_t = np.roll(MINOR_PROFILE, tonic)
-        correlations.append(_pearson_correlation(chroma_mean, major_t))
-        labels.append(_major_key_label(tonic))
-        correlations.append(_pearson_correlation(chroma_mean, minor_t))
-        labels.append(_minor_key_label(tonic))
+        corrs[k] = _pearson_correlation(chroma_mean, np.roll(MAJOR_PROFILE, tonic))
+        corrs[k + 1] = _pearson_correlation(chroma_mean, np.roll(MINOR_PROFILE, tonic))
+        k += 2
 
-    corrs = np.asarray(correlations, dtype=np.float64)
     best_idx = int(np.argmax(corrs))
     best_r = float(corrs[best_idx])
     second_r = float(np.partition(corrs, -2)[-2]) if corrs.size >= 2 else best_r
     margin = max(0.0, best_r - second_r)
 
-    # Map best correlation from [-1, 1] to a base score in [0, 1].
-    base = float(np.clip((best_r + 1.0) / 2.0, 0.0, 1.0))
-    # Sharpen with separation: typical margins are small (0.02–0.15); cap contribution.
-    separation = float(np.clip(margin / 0.12, 0.0, 1.0))
-    confidence = float(np.clip(0.55 * base + 0.45 * base * (0.35 + 0.65 * separation), 0.0, 1.0))
+    tonic = best_idx // 2
+    if best_idx % 2 == 0:
+        key_name = _major_key_label(tonic)
+    else:
+        key_name = _minor_key_label(tonic)
 
-    return labels[best_idx], round(confidence, 3)
+    base = float(np.clip((best_r + 1.0) / 2.0, 0.0, 1.0))
+    separation = float(np.clip(margin / 0.12, 0.0, 1.0))
+    confidence = float(
+        np.clip(0.55 * base + 0.45 * base * (0.35 + 0.65 * separation), 0.0, 1.0)
+    )
+
+    return key_name, round(confidence, 3)
 
 
 def analyze_audio_bytes(data: bytes, filename: str = "audio") -> AnalysisResult:
     """Load audio from bytes and return BPM + key with pre-processing and beat confidence."""
-    y, sr = _load_body_or_fallback(data)
+    gc.collect()
+
+    sr = ANALYSIS_SR
+    y = _load_body_or_fallback(data)
     if y.size == 0:
         return AnalysisResult(bpm=0, bpm_confidence=0.0, key="unknown", confidence=0.0)
 
     y = _preprocess(y, sr)
     if y.size == 0:
+        del y
+        gc.collect()
         return AnalysisResult(bpm=0, bpm_confidence=0.0, key="unknown", confidence=0.0)
 
-    # BPM: full-band onset on the same analysis window (post-intro when available).
     onset_env = librosa.onset.onset_strength(y=y, sr=sr, hop_length=HOP_LENGTH)
     bpm_float, beat_frames = _bpm_from_beat_track(onset_env, sr)
+    del onset_env
+    gc.collect()
+
     bpm_rounded = int(round(bpm_float))
     if bpm_rounded < 1:
         bpm_rounded = 1
 
     bpm_conf = _beat_consistency_score(beat_frames, sr)
     alternates = _half_double_alternates(bpm_rounded)
+    del beat_frames
+    gc.collect()
 
     y_key = _harmonic_preemphasis(y, sr)
+    del y
+    gc.collect()
+
     chroma = librosa.feature.chroma_cqt(
         y=y_key,
         sr=sr,
-        hop_length=HOP_LENGTH,
+        hop_length=CHROMA_HOP_LENGTH,
     )
+    del y_key
+    gc.collect()
+
     key_name, key_conf = _estimate_key_krumhansl_schmuckler(chroma)
+    del chroma
+    gc.collect()
 
     return AnalysisResult(
         bpm=bpm_rounded,
