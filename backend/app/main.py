@@ -48,12 +48,13 @@ _origins = os.getenv(
     "http://127.0.0.1:5500,http://localhost:5500,"
     "http://127.0.0.1:5501,http://localhost:5501,"
     "http://127.0.0.1:8080,http://localhost:8080,"
-    "http://localhost:3000,http://127.0.0.1:3000",
+    "http://localhost:3000,http://127.0.0.1:3000,"
+    "https://findthekey.es"
 )
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[o.strip() for o in _origins.split(",") if o.strip()],
-    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost)(:\d+)?$",
+    allow_origin_regex=r"https?://(127\.0\.0\.1|localhost|.*\.onrender\.com|findthekey\.es)(:\d+)?$",
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
